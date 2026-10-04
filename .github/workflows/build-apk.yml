@@ -24,13 +24,17 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install NDK & CMake
+      - name: Install Android NDK & CMake
+        # ubuntu-latest runners ship ANDROID_HOME with cmdline-tools; the
+        # legacy 'tools' package no longer exists, so skip setup-android and
+        # install exactly what the build needs.
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "ndk;26.3.11579264" "cmake;3.22.1" "platforms;android-35" "build-tools;34.0.0"
+          export ANDROID_HOME="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKMANAGER" ] || SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager | head -1)"
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "ndk;26.3.11579264" "cmake;3.22.1" "platforms;android-35" "build-tools;34.0.0"
 
       - name: Restore release keystore
         env:
