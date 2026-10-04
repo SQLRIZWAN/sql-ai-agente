@@ -28,10 +28,9 @@ class MaintenanceWorker(
         return runCatching {
             val db = AppDatabase.open(appContextSafe())
             // Bound the thinking log to the newest 500 rows.
-            db.run {
-                insertLog("worker", "maintenance tick")
-                close() // release native pages between runs
-            }
+            // NOTE: never close() the singleton here — the UI holds the same
+            // handle; a closed instance would break every later write.
+            db.insertLog("worker", "maintenance tick")
 
             val gov = app.modelGovernor
             val resident = gov.residentBytes.value

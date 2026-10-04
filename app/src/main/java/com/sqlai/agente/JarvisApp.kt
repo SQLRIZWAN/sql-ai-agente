@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.os.Build
 import android.os.StrictMode
+import android.util.Log
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.sqlai.agente.core.ai.ModelMemoryGovernor
 import com.sqlai.agente.core.ai.ProviderRegistry
@@ -13,6 +14,10 @@ import com.sqlai.agente.core.monitor.SystemMonitor
 import com.sqlai.agente.core.trading.TradingEngine
 import com.sqlai.agente.core.vault.Vault
 import com.sqlai.agente.data.db.AppDatabase
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Application entry point for SQL AI AGENTE.
@@ -34,23 +39,50 @@ class JarvisApp : Application() {
     val systemMonitor: SystemMonitor by lazy { SystemMonitor(this) }
 
     override fun onCreate() {
+        // MUST be first: captures any startup crash (Activity, Compose, DB,
+        // native) to filesDir/last_crash.txt so the next launch can show it.
+        installCrashReporter()
         super.onCreate()
         instance = this
         configureStrictMode()
         createNotificationChannels()
-        ProcessLifecycleOwner.get().lifecycle.addObserver(modelGovernor)
+        runCatching {
+            ProcessLifecycleOwner.get().lifecycle.addObserver(modelGovernor)
+        }.onFailure {
+            Log.w(TAG, "ProcessLifecycleOwner unavailable; governor not attached", it)
+        }
     }
 
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         // Release native GGUF buffers + decoded audio frames before LMK kills us.
-        modelGovernor.onHostTrim(level)
-        linuxSubsystem.onHostTrim(level)
+        runCatching { modelGovernor.onHostTrim(level) }
+        runCatching { linuxSubsystem.onHostTrim(level) }
     }
 
     override fun onLowMemory() {
         super.onLowMemory()
-        modelGovernor.forceUnloadAll()
+        runCatching { modelGovernor.forceUnloadAll() }
+    }
+
+    private fun installCrashReporter() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val report = buildString {
+                    appendLine("time=${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
+                    appendLine(
+                        "device=${Build.MANUFACTURER} ${Build.MODEL} " +
+                            "sdk=${Build.VERSION.SDK_INT} abi=${Build.SUPPORTED_ABIS.firstOrNull()}"
+                    )
+                    appendLine("thread=${thread.name}")
+                    appendLine(throwable.stackTraceToString())
+                }
+                File(filesDir, CRASH_FILE).writeText(report)
+                Log.e(TAG, "uncaught crash captured", throwable)
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
     }
 
     private fun configureStrictMode() {
@@ -87,6 +119,8 @@ class JarvisApp : Application() {
     companion object {
         const val CHANNEL_ORCHESTRATOR = "orchestrator"
         const val CHANNEL_TRADING = "trading"
+        const val CRASH_FILE = "last_crash.txt"
+        private const val TAG = "SqlAi"
 
         @Volatile
         lateinit var instance: JarvisApp

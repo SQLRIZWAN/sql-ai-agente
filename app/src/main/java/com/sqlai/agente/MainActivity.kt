@@ -81,19 +81,37 @@ class MainActivity : ComponentActivity() {
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
         val app = application as JarvisApp
-        MaintenanceWorker.schedule(this)
+        runCatching { MaintenanceWorker.schedule(this) }
+            .onFailure { android.util.Log.w("SqlAi", "WorkManager schedule skipped", it) }
 
         setContent {
             SqlAiTheme {
                 AppRoot(app)
             }
         }
+
+        // If the previous run crashed, surface the captured stack trace so the
+        // user can screenshot it instead of the app dying silently again.
+        window.decorView.post { showLastCrashIfAny() }
+    }
+
+    private fun showLastCrashIfAny() {
+        val file = java.io.File(filesDir, JarvisApp.CRASH_FILE)
+        if (!file.exists()) return
+        val report = runCatching { file.readText() }.getOrDefault("")
+        runCatching { file.delete() }
+        if (report.isBlank()) return
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Crash report — please screenshot & share")
+            .setMessage(report.take(3500))
+            .setPositiveButton("Close", null)
+            .show()
     }
 
     override fun onDestroy() {
         // Only tear down the DB when the activity is going away for good.
         if (isFinishing) {
-            (application as? JarvisApp)?.linuxSubsystem?.closeSession()
+            runCatching { (application as? JarvisApp)?.linuxSubsystem?.closeSession() }
         }
         super.onDestroy()
     }
@@ -129,7 +147,7 @@ private fun AppRoot(app: JarvisApp) {
     var termRunning by remember { mutableStateOf(false) }
     var termBanner by remember { mutableStateOf("") }
 
-    val db = remember { AppDatabase.open(app) }
+    val db = remember { runCatching { AppDatabase.open(app) }.getOrNull() }
     val a11ySvc = JarvisAccessibilityService.instance
     val a11yTree by (a11ySvc?.tree
         ?: remember { kotlinx.coroutines.flow.MutableStateFlow(emptyList<com.sqlai.agente.core.automation.UiNode>()) })
@@ -141,7 +159,7 @@ private fun AppRoot(app: JarvisApp) {
     LaunchedEffect(Unit) {
         // Restore recent conversation locally (encrypted at rest).
         withContext(Dispatchers.IO) {
-            val rows = runCatching { db.recentMessages(40) }.getOrDefault(emptyList())
+            val rows = runCatching { db?.recentMessages(40) }.getOrNull() ?: emptyList()
             withContext(Dispatchers.Main) {
                 rows.forEach { (role, content, provider) ->
                     chat += ChatLine(role, content, provider)
@@ -206,37 +224,56 @@ private fun AppRoot(app: JarvisApp) {
                         chat += ChatLine("user", prompt)
                         busy = true
                         scope.launch {
-                            thinking += "route: ${app.providerRegistry.priorityOrder().joinToString(">")}"
-                            val result = withContext(Dispatchers.IO) {
-                                app.providerRegistry.chat(
-                                    listOf(
-                                        com.sqlai.agente.core.ai.ChatMessage("user", prompt)
-                                    )
-                                )
-                            }
-                            activeProvider = result.provider
-                            busy = false
-                            if (result.text.isNotBlank()) {
-                                chat += ChatLine(
-                                    "assistant",
-                                    result.text,
-                                    buildString {
-                                        append(result.provider)
-                                        append(" · ${result.latencyMs}ms")
-                                        if (result.fallbackUsed) append(" · fallback")
-                                    },
-                                )
-                                thinking += "reply from ${result.provider} in ${result.latencyMs}ms"
-                                withContext(Dispatchers.IO) {
-                                    runCatching { db.insertMessage("user", prompt, null) }
-                                    runCatching { db.insertMessage("assistant", result.text, result.provider) }
+                            try {
+                                thinking += "route: " +
+                                    runCatching {
+                                        app.providerRegistry.priorityOrder().joinToString(">")
+                                    }.getOrDefault("—")
+                                val result = withContext(Dispatchers.IO) {
+                                    runCatching {
+                                        app.providerRegistry.chat(
+                                            listOf(
+                                                com.sqlai.agente.core.ai.ChatMessage("user", prompt)
+                                            )
+                                        )
+                                    }.getOrElse { e ->
+                                        com.sqlai.agente.core.ai.ProviderResult(
+                                            provider = "local",
+                                            text = "",
+                                            latencyMs = 0L,
+                                            fallbackUsed = false,
+                                            error = e.message,
+                                        )
+                                    }
                                 }
-                            } else {
-                                chat += ChatLine(
-                                    "system",
-                                    "All providers failed: ${result.error ?: "unknown"}",
-                                )
-                                thinking += "error: ${result.error}"
+                                activeProvider = result.provider
+                                if (result.text.isNotBlank()) {
+                                    chat += ChatLine(
+                                        "assistant",
+                                        result.text,
+                                        buildString {
+                                            append(result.provider)
+                                            append(" · ${result.latencyMs}ms")
+                                            if (result.fallbackUsed) append(" · fallback")
+                                        },
+                                    )
+                                    thinking += "reply from ${result.provider} in ${result.latencyMs}ms"
+                                    withContext(Dispatchers.IO) {
+                                        runCatching { db?.insertMessage("user", prompt, null) }
+                                        runCatching { db?.insertMessage("assistant", result.text, result.provider) }
+                                    }
+                                } else {
+                                    chat += ChatLine(
+                                        "system",
+                                        "All providers failed: ${result.error ?: "unknown"}",
+                                    )
+                                    thinking += "error: ${result.error}"
+                                }
+                            } catch (t: Throwable) {
+                                chat += ChatLine("system", "error: ${t.message}")
+                                thinking += "error: ${t.message}"
+                            } finally {
+                                busy = false
                             }
                         }
                     },
@@ -306,7 +343,7 @@ private fun AppRoot(app: JarvisApp) {
                     serviceActive = a11yActive,
                     currentPackage = a11ySvc?.currentPackage ?: "",
                     nodes = a11yTree,
-                    workflows = runCatching { db.listWorkflows() }.getOrDefault(emptyList()),
+                    workflows = runCatching { db?.listWorkflows() }.getOrNull() ?: emptyList(),
                     logs = autoLogs,
                     onTapNode = { n ->
                         autoLogs += "tap ${n.text ?: n.viewId}"
@@ -331,22 +368,35 @@ private fun AppRoot(app: JarvisApp) {
                 )
 
                 4 -> SettingsScreen(
-                    hasKey = { k -> app.vault.hasSecret(k) || app.vault.getPlain(k) != null },
-                    onSave = { k, v ->
-                        if (v.isEmpty()) app.vault.deleteSecret(k)
-                        else app.vault.putSecret(k, v)
+                    hasKey = { k ->
+                        runCatching { app.vault.hasSecret(k) || app.vault.getPlain(k) != null }
+                            .getOrDefault(false)
                     },
-                    onDelete = { k ->
-                        when (k) {
-                            "__PURGE__" -> scope.launch(Dispatchers.IO) { runCatching { db.clearAll() } }
-                            else -> app.vault.deleteSecret(k)
+                    onSave = { k, v ->
+                        runCatching {
+                            if (v.isEmpty()) app.vault.deleteSecret(k)
+                            else app.vault.putSecret(k, v)
                         }
                     },
-                    providerOrder = app.providerRegistry.priorityOrder().joinToString(",") { it.name },
+                    onDelete = { k ->
+                        runCatching {
+                            when (k) {
+                                "__PURGE__" -> db?.clearAll()
+                                else -> app.vault.deleteSecret(k)
+                            }
+                        }
+                    },
+                    providerOrder = runCatching {
+                        app.providerRegistry.priorityOrder().joinToString(",") { it.name }
+                    }.getOrDefault(""),
                     onProviderOrderChanged = { raw ->
-                        val parsed = raw.split(",")
-                            .mapNotNull { runCatching { ProviderPriority.valueOf(it.trim().uppercase()) }.getOrNull() }
-                        if (parsed.isNotEmpty()) app.providerRegistry.setPriorityOrder(parsed)
+                        runCatching {
+                            val parsed = raw.split(",")
+                                .mapNotNull {
+                                    runCatching { ProviderPriority.valueOf(it.trim().uppercase()) }.getOrNull()
+                                }
+                            if (parsed.isNotEmpty()) app.providerRegistry.setPriorityOrder(parsed)
+                        }
                     },
                 )
             }

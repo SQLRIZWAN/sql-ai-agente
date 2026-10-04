@@ -106,6 +106,9 @@ class AppDatabase private constructor(private val db: SQLiteDatabase) {
         runCatching { db.close() }
     }
 
+    /** True while the underlying handle is open (guards against a stale singleton). */
+    fun isUsable(): Boolean = runCatching { db.isOpen }.getOrDefault(false)
+
     companion object {
         private const val DB_NAME = "sqlai_agent.db"
 
@@ -117,9 +120,9 @@ class AppDatabase private constructor(private val db: SQLiteDatabase) {
          * The raw key exists only on the JVM stack for the duration of this call.
          */
         fun open(context: Context): AppDatabase {
-            instance?.let { return it }
+            instance?.let { if (it.isUsable()) return it else instance = null }
             synchronized(this) {
-                instance?.let { return it }
+                instance?.let { if (it.isUsable()) return it else instance = null }
 
                 val vault = Vault(context)
                 val passphrase: String

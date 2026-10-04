@@ -1,5 +1,11 @@
 # SQL AI AGENTE - R8 / ProGuard rules
--keep class com.sqlai.agente.nativebridge.** { *; }
+
+# Keep the whole app package: JNI callbacks (C++ resolves class/method names by
+# string), WorkManager workers (instantiated reflectively from the DB) and
+# Compose entry points must never be renamed or stripped.
+-keep class com.sqlai.agente.** { *; }
+-keepclassmembers class com.sqlai.agente.** { native <methods>; }
+-keep class com.sqlai.agente.ui.nativebridge.NativeEngine$TokenListener { *; }
 -keepclasseswithmembernames class * {
     native <methods>;
 }

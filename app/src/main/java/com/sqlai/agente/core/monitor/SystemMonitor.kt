@@ -59,29 +59,35 @@ class SystemMonitor(context: Context) {
     private fun startSampling() {
         sampleJob = scope.launch {
             // First call seeds the CPU delta window.
-            nativeCpuPercent()
+            runCatching { nativeCpuPercent() }
             while (isActive) {
-                val memInfo = ActivityManager.MemoryInfo()
-                am.getMemoryInfo(memInfo)
+                runCatching {
+                    val memInfo = ActivityManager.MemoryInfo()
+                    am.getMemoryInfo(memInfo)
 
-                // PowerManager thermal status: 0=NONE .. 6=SHUTDOWN (API 29+, minSdk 29).
-                val thermalStatus = runCatching {
-                    pm.currentThermalStatus
-                }.getOrDefault(0)
-                val thermal = thermalStatus >= 4 // THERMAL_STATUS_CRITICAL
+                    // PowerManager thermal status: 0=NONE .. 6=SHUTDOWN (API 29+, minSdk 29).
+                    val thermalStatus = runCatching {
+                        pm.currentThermalStatus
+                    }.getOrDefault(0)
+                    val thermal = thermalStatus >= 4 // THERMAL_STATUS_CRITICAL
 
-                _stats.value = SystemStats(
-                    cpuPercent = nativeCpuPercent(),
-                    usedRamBytes = memInfo.totalMem - memInfo.availMem,
-                    totalRamBytes = memInfo.totalMem,
-                    appPssBytes = nativePssBytes(),
-                    threadCount = nativeThreadCount(),
-                    thermalStatus = if (thermal) ThermalStatus.CRITICAL else ThermalStatus.NONE,
-                    loadedModel = _stats.value.loadedModel,
-                    modelRssBytes = _stats.value.modelRssBytes,
-                    activeBots = _stats.value.activeBots,
-                    backgroundJobs = _stats.value.backgroundJobs,
-                )
+                    _stats.value = SystemStats(
+                        cpuPercent = runCatching { nativeCpuPercent() }.getOrDefault(0),
+                        usedRamBytes = memInfo.totalMem - memInfo.availMem,
+                        totalRamBytes = memInfo.totalMem,
+                        appPssBytes = runCatching { nativePssBytes() }.getOrDefault(0L),
+                        threadCount = runCatching { nativeThreadCount() }.getOrDefault(0),
+                        thermalStatus = if (thermal) ThermalStatus.CRITICAL else ThermalStatus.NONE,
+                        loadedModel = _stats.value.loadedModel,
+                        modelRssBytes = _stats.value.modelRssBytes,
+                        activeBots = _stats.value.activeBots,
+                        backgroundJobs = _stats.value.backgroundJobs,
+                    )
+                }.onFailure {
+                    // Never let a native/system failure kill the sampling coroutine
+                    // (an uncaught exception here would crash the whole app).
+                    _stats.value = _stats.value.copy(cpuPercent = 0)
+                }
                 delay(1_000)
             }
         }
