@@ -39,6 +39,25 @@ android {
         }
     }
 
+    signingConfigs {
+        // Release signing: keystore + passwords come from CI secrets (env vars)
+        // or a git-ignored release.keystore next to this file. When absent, the
+        // release buildType falls back to debug signing so builds never hard-fail.
+        val ksFile = System.getenv("SQLAI_KEYSTORE_FILE")
+            ?.let { file(it) }
+            ?: rootProject.file("release.keystore")
+        val storePass = System.getenv("SQLAI_STOREPASS")
+        val keyPass = System.getenv("SQLAI_KEYPASS") ?: storePass
+        if (ksFile.exists() && storePass != null) {
+            create("release") {
+                storeFile = ksFile
+                storePassword = storePass
+                keyAlias = System.getenv("SQLAI_KEYALIAS") ?: "sqlai"
+                keyPassword = keyPass
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
@@ -47,6 +66,8 @@ android {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            signingConfig = signingConfigs.findByName("release")
+                ?: signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
