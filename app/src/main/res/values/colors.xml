@@ -1,0 +1,8 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <color name="ic_launcher_background">#070B12</color>
+    <color name="jet_black">#05070C</color>
+    <color name="deep_panel">#0B101B</color>
+    <color name="neon_cyan">#22E6D8</color>
+    <color name="neon_violet">#8B5CF6</color>
+    <color name="neon_amber">#FFB020</color>
+</resources>

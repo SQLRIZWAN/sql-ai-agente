@@ -1,0 +1,15 @@
+<resources>
+    <string name="app_name">SQL AI AGENTE</string>
+    <string name="accessibility_service_label">SQL AI AGENTE Controller</string>
+    <string name="accessibility_service_description">Allows SQL AI AGENTE to read the UI hierarchy and perform gestures so the local agent can automate apps on your behalf. All processing stays on-device.</string>
+
+    <string name="tab_workspace">Agent</string>
+    <string name="tab_terminal">Terminal</string>
+    <string name="tab_trading">Trading</string>
+    <string name="tab_automation">Automation</string>
+    <string name="tab_settings">Vault</string>
+
+    <string name="workspace_hint">Ask, plan, execute…</string>
+    <string name="terminal_hint">Type a command…</string>
+    <string name="settings_hint">Enter API key</string>
+</resources>

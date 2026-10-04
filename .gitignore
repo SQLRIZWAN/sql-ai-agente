@@ -1,0 +1,26 @@
+# Gradle
+.gradle/
+build/
+app/build/
+
+# Android Studio / IDE
+.idea/
+*.iml
+captures/
+.externalNativeBuild/
+.cxx/
+local.properties
+
+# Native vendored sources (fetch via scripts)
+app/src/main/cpp/llama/llama.cpp/
+app/src/main/cpp/whisper/whisper.cpp/
+
+# OS
+.DS_Store
+*.log
+
+# Secrets — never commit
+*.jks
+*.keystore
+*.pep
+secrets.properties
