@@ -1,11 +1,15 @@
 package com.sqlai.agente.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -31,10 +35,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -42,6 +48,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import com.sqlai.agente.ui.components.SectionHeader
 import com.sqlai.agente.ui.theme.DeepPanel
+import com.sqlai.agente.ui.theme.NeonAmber
 import com.sqlai.agente.ui.theme.NeonCyan
 import com.sqlai.agente.ui.theme.NeonLime
 import com.sqlai.agente.ui.theme.NeonRose
@@ -50,31 +57,16 @@ import com.sqlai.agente.ui.theme.RaisedPanel
 import com.sqlai.agente.ui.theme.StrokeDim
 import com.sqlai.agente.ui.theme.TextMuted
 import com.sqlai.agente.ui.theme.TextSecondary
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.File
 
 private data class VaultField(
     val key: String,
     val label: String,
     val hint: String,
     val secret: Boolean = true,
-)
-
-private val AI_FIELDS = listOf(
-    VaultField("provider.gemini", "Gemini API key", "AIza…"),
-    VaultField("provider.grok", "Grok API key", "xai-…"),
-    VaultField("provider.deepseek", "DeepSeek API key", "sk-…"),
-    VaultField("provider.openai", "OpenAI API key", "sk-…"),
-    VaultField("provider.ollama.endpoint", "Ollama / LM Studio endpoint", "http://192.168.1.5:11434", false),
-)
-
-private val EXCHANGE_FIELDS = listOf(
-    VaultField("exchange.binance.api_key", "Binance API key", "…"),
-    VaultField("exchange.binance.api_secret", "Binance API secret", "…"),
-    VaultField("exchange.bitget.api_key", "Bitget API key", "…"),
-    VaultField("exchange.bitget.api_secret", "Bitget API secret", "…"),
-    VaultField("exchange.bitget.passphrase", "Bitget passphrase", "…"),
-    VaultField("exchange.bybit.api_key", "Bybit API key", "…"),
-    VaultField("exchange.bybit.api_secret", "Bybit API secret", "…"),
-    VaultField("exchange.exness.token", "Exness token", "…"),
 )
 
 private data class ModelField(
@@ -84,36 +76,51 @@ private data class ModelField(
     val presets: List<String>,
 )
 
-private val MODEL_FIELDS = listOf(
-    ModelField(
-        "model.gemini", "Gemini model", "gemini-2.0-flash",
-        listOf("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-lite"),
+// Google AI Studio (free tier) + paid-tier ids for Gemini.
+private val GEMINI_MODELS = ModelField(
+    "model.gemini", "Model", "gemini-2.5-flash",
+    listOf(
+        "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+        "gemini-2.0-flash", "gemini-2.0-flash-lite",
+        "gemini-1.5-flash", "gemini-1.5-pro",
     ),
-    ModelField(
-        "model.grok", "Grok model", "grok-3-mini",
-        listOf("grok-3-mini", "grok-3", "grok-4-fast", "grok-3-mini-latest"),
-    ),
-    ModelField(
-        "model.deepseek", "DeepSeek model", "deepseek-chat",
-        listOf("deepseek-chat", "deepseek-reasoner"),
-    ),
-    ModelField(
-        "model.openai", "OpenAI model", "gpt-4o-mini",
-        listOf("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"),
-    ),
-    ModelField(
-        "model.ollama", "Ollama / LM Studio model", "qwen2.5-coder:3b",
-        listOf("qwen2.5-coder:3b", "llama3.2:3b", "phi4-mini", "mistral:7b-instruct", "gemma3:4b"),
+)
+private val GROK_MODELS = ModelField(
+    "model.grok", "Model", "grok-4-fast",
+    listOf("grok-4-fast", "grok-4", "grok-3-mini", "grok-3"),
+)
+private val DEEPSEEK_MODELS = ModelField(
+    "model.deepseek", "Model", "deepseek-chat",
+    listOf("deepseek-chat", "deepseek-reasoner"),
+)
+private val OPENAI_MODELS = ModelField(
+    "model.openai", "Model", "gpt-4o-mini",
+    listOf("gpt-4.1-mini", "gpt-4.1", "gpt-4.1-nano", "gpt-4o-mini", "gpt-4o", "o4-mini"),
+)
+private val OLLAMA_MODELS = ModelField(
+    "model.ollama", "Model", "qwen2.5-coder:3b",
+    listOf(
+        "llama3.2:3b", "llama3.1:8b", "llama3.2:1b",
+        "gemma3:4b", "gemma3:12b", "gemma2:2b",
+        "qwen2.5-coder:3b", "qwen2.5:7b",
+        "phi4-mini", "mistral:7b-instruct",
     ),
 )
 
 private const val LOCAL_MODEL_KEY = "model.local"
 
+private val ROUTING_CHOICES = listOf(
+    "AUTO", "LOCAL", "GEMINI", "GROK", "DEEPSEEK", "OPENAI",
+)
+
 /**
  * Tab 5 — Settings & API Vault.
- * Keys are AES-256-GCM sealed through the Android Keystore the moment "Save" is hit;
- * the UI never echoes a stored value back, only a masked "••• set" indicator.
+ *
+ * Layout rule (user request): every provider's API key + model picker live in the
+ * SAME section, so nothing is scattered. Keys are AES-256-GCM sealed through the
+ * Android Keystore on Save; the UI never echoes a stored value back.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(
     hasKey: (String) -> Boolean,
@@ -122,14 +129,41 @@ fun SettingsScreen(
     providerOrder: String,
     onProviderOrderChanged: (String) -> Unit,
     read: (String) -> String? = { null },
+    routingMode: String = "AUTO",
+    onRoutingChanged: (String) -> Unit = {},
     localModelState: String = "EMPTY",
     onLoadLocal: (String) -> Unit = {},
     onUnloadLocal: () -> Unit = {},
 ) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val visible = remember { mutableStateMapOf<String, Boolean>() }
     val drafts = remember { mutableStateMapOf<String, String>() }
     var savedFlash by remember { mutableStateOf<String?>(null) }
+
     var localPath by remember { mutableStateOf(read(LOCAL_MODEL_KEY) ?: "") }
+    var localStatus by remember { mutableStateOf<String?>(null) }
+    var localFiles by remember { mutableStateOf(listLocalModels(context)) }
+
+    val ggufPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            localStatus = "importing file into app storage…"
+            val result = withContext(Dispatchers.IO) { importGguf(context, uri) }
+            result.onSuccess { file ->
+                localFiles = listLocalModels(context)
+                localPath = file.absolutePath
+                onSave(LOCAL_MODEL_KEY, file.absolutePath)
+                savedFlash = LOCAL_MODEL_KEY
+                localStatus = "imported ${file.name} (${file.length() / (1024 * 1024)} MB)"
+                onLoadLocal(file.absolutePath)
+            }.onFailure { e ->
+                localStatus = "import failed: ${e.message}"
+            }
+        }
+    }
 
     LazyColumn(
         Modifier
@@ -169,13 +203,32 @@ fun SettingsScreen(
             }
         }
 
+        // ------------------------------ routing ------------------------------
         item {
-            SectionHeader("Provider priority (first = preferred)", NeonCyan)
+            SectionHeader("Routing — fallback chain vs manual pin", NeonCyan)
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                ROUTING_CHOICES.forEach { choice ->
+                    Chip(
+                        label = if (choice == "AUTO") "AUTO · fallback chain" else choice,
+                        selected = routingMode == choice,
+                    ) { onRoutingChanged(choice) }
+                }
+            }
+            Text(
+                "AUTO walks the order below and falls through on any error/timeout. " +
+                    "Pin a provider to force it exclusively (no fallback).",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextMuted,
+            )
             OutlinedTextField(
                 value = providerOrder,
                 onValueChange = onProviderOrderChanged,
                 modifier = Modifier.fillMaxWidth(),
                 placeholder = { Text("LOCAL,GEMINI,DEEPSEEK,GROK,OPENAI", color = TextMuted) },
+                label = { Text("Fallback order (first = preferred)", color = TextMuted) },
                 singleLine = true,
                 textStyle = MaterialTheme.typography.labelSmall.copy(
                     color = MaterialTheme.colorScheme.onBackground,
@@ -183,24 +236,48 @@ fun SettingsScreen(
                 ),
                 colors = fieldColors(),
             )
-            Text(
-                "On heavy local load the chain falls through to the next provider automatically.",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
-            )
         }
 
-        item { SectionHeader("AI providers", NeonCyan) }
-        items(AI_FIELDS.size) { i -> VaultRow(AI_FIELDS[i], hasKey, drafts, visible, savedFlash) { k, v ->
-            onSave(k, v); savedFlash = k
-        } }
-
-        item { SectionHeader("Model selection (tap a preset or type your own)", NeonViolet) }
-        items(MODEL_FIELDS.size) { i ->
-            ModelRow(MODEL_FIELDS[i], read, onSave) { savedFlash = it }
+        // ------------------- providers: key + model together ------------------
+        item { SectionHeader("Gemini · API key + model", NeonCyan) }
+        item {
+            VaultRow(vaultField("provider.gemini", "Gemini API key", "AIza…"),
+                hasKey, drafts, visible, savedFlash) { k, v -> onSave(k, v); savedFlash = k }
         }
+        item { ModelRow(GEMINI_MODELS, read, onSave) { savedFlash = it } }
 
-        item { SectionHeader("Local AI model (GGUF · runs on-device)", NeonLime) }
+        item { SectionHeader("Grok · API key + model", NeonCyan) }
+        item {
+            VaultRow(vaultField("provider.grok", "Grok API key", "xai-…"),
+                hasKey, drafts, visible, savedFlash) { k, v -> onSave(k, v); savedFlash = k }
+        }
+        item { ModelRow(GROK_MODELS, read, onSave) { savedFlash = it } }
+
+        item { SectionHeader("DeepSeek · API key + model", NeonCyan) }
+        item {
+            VaultRow(vaultField("provider.deepseek", "DeepSeek API key", "sk-…"),
+                hasKey, drafts, visible, savedFlash) { k, v -> onSave(k, v); savedFlash = k }
+        }
+        item { ModelRow(DEEPSEEK_MODELS, read, onSave) { savedFlash = it } }
+
+        item { SectionHeader("OpenAI · API key + model", NeonCyan) }
+        item {
+            VaultRow(vaultField("provider.openai", "OpenAI API key", "sk-…"),
+                hasKey, drafts, visible, savedFlash) { k, v -> onSave(k, v); savedFlash = k }
+        }
+        item { ModelRow(OPENAI_MODELS, read, onSave) { savedFlash = it } }
+
+        item { SectionHeader("Ollama / LM Studio · endpoint + model", NeonCyan) }
+        item {
+            VaultRow(
+                vaultField("provider.ollama.endpoint", "Endpoint", "http://192.168.1.5:11434", false),
+                hasKey, drafts, visible, savedFlash,
+            ) { k, v -> onSave(k, v); savedFlash = k }
+        }
+        item { ModelRow(OLLAMA_MODELS, read, onSave) { savedFlash = it } }
+
+        // -------------------- local GGUF: browse + manage --------------------
+        item { SectionHeader("Local AI model (llama.cpp GGUF · on-device)", NeonLime) }
         item {
             Surface(
                 Modifier.fillMaxWidth(),
@@ -214,7 +291,7 @@ fun SettingsScreen(
                 Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "llama.cpp weights",
+                            "Weights",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onBackground,
                             modifier = Modifier.weight(1f),
@@ -226,6 +303,26 @@ fun SettingsScreen(
                             fontFamily = FontFamily.Monospace,
                         )
                     }
+
+                    // Already-imported GGUF files in app storage — tap to select.
+                    if (localFiles.isNotEmpty()) {
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            localFiles.forEach { f ->
+                                Chip(
+                                    label = f.name,
+                                    selected = localPath == f.absolutePath,
+                                ) {
+                                    localPath = f.absolutePath
+                                    onSave(LOCAL_MODEL_KEY, f.absolutePath)
+                                    savedFlash = LOCAL_MODEL_KEY
+                                }
+                            }
+                        }
+                    }
+
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(7.dp),
@@ -235,7 +332,7 @@ fun SettingsScreen(
                             onValueChange = { localPath = it },
                             modifier = Modifier.weight(1f),
                             placeholder = {
-                                Text("/storage/emulated/0/models/qwen-3b-q4.gguf", color = TextMuted)
+                                Text("…/models/gemma3-4b-q4_K_M.gguf", color = TextMuted)
                             },
                             singleLine = true,
                             textStyle = MaterialTheme.typography.labelSmall.copy(
@@ -245,6 +342,14 @@ fun SettingsScreen(
                             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
                             colors = fieldColors(),
                         )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        TextButtonPill("Browse GGUF…") {
+                            ggufPicker.launch(arrayOf("*/*"))
+                        }
                         TextButtonPill("Load") {
                             val path = localPath.trim()
                             if (path.isNotEmpty()) {
@@ -255,8 +360,13 @@ fun SettingsScreen(
                         }
                         TextButtonPill("Unload") { onUnloadLocal() }
                     }
+                    localStatus?.let {
+                        Text(it, style = MaterialTheme.typography.labelSmall, color = NeonAmber)
+                    }
                     Text(
-                        "Path is stored encrypted; weights are evicted on background/thermal throttle.",
+                        "Browse → pick any .gguf (Llama / Gemma / Qwen …) from Files; " +
+                            "it is copied into private app storage, then loaded. " +
+                            "Evicted automatically on background / thermal throttle.",
                         style = MaterialTheme.typography.labelSmall,
                         color = TextMuted,
                     )
@@ -264,11 +374,25 @@ fun SettingsScreen(
             }
         }
 
+        // ------------------------------ exchange ------------------------------
         item { SectionHeader("Exchange keys", NeonRose) }
-        items(EXCHANGE_FIELDS.size) { i -> VaultRow(EXCHANGE_FIELDS[i], hasKey, drafts, visible, savedFlash) { k, v ->
-            onSave(k, v); savedFlash = k
-        } }
+        val exchangeFields = listOf(
+            vaultField("exchange.binance.api_key", "Binance API key", "…"),
+            vaultField("exchange.binance.api_secret", "Binance API secret", "…"),
+            vaultField("exchange.bitget.api_key", "Bitget API key", "…"),
+            vaultField("exchange.bitget.api_secret", "Bitget API secret", "…"),
+            vaultField("exchange.bitget.passphrase", "Bitget passphrase", "…"),
+            vaultField("exchange.bybit.api_key", "Bybit API key", "…"),
+            vaultField("exchange.bybit.api_secret", "Bybit API secret", "…"),
+            vaultField("exchange.exness.token", "Exness token", "…"),
+        )
+        items(exchangeFields.size) { i ->
+            VaultRow(exchangeFields[i], hasKey, drafts, visible, savedFlash) { k, v ->
+                onSave(k, v); savedFlash = k
+            }
+        }
 
+        // ------------------------------ storage -------------------------------
         item { SectionHeader("Storage", NeonViolet) }
         item {
             Row(
@@ -291,6 +415,56 @@ fun SettingsScreen(
             }
         }
         item { Box(Modifier.size(10.dp)) }
+    }
+}
+
+private fun vaultField(key: String, label: String, hint: String, secret: Boolean = true) =
+    VaultField(key, label, hint, secret)
+
+private fun listLocalModels(context: android.content.Context): List<File> =
+    runCatching {
+        File(context.filesDir, "models")
+            .listFiles { f -> f.isFile && f.extension.equals("gguf", ignoreCase = true) }
+            ?.sortedByDescending { it.lastModified() }
+            ?: emptyList()
+    }.getOrDefault(emptyList())
+
+/**
+ * Streams a SAF document into filesDir/models/<name> so llama.cpp gets a real
+ * filesystem path (content:// URIs cannot be mmap'd by the native engine).
+ */
+private fun importGguf(context: android.content.Context, uri: android.net.Uri): Result<File> =
+    runCatching {
+        val resolver = context.contentResolver
+        val name = resolver.query(uri, null, null, null, null)?.use { c ->
+            val idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+            if (c.moveToFirst() && idx >= 0) c.getString(idx) else null
+        } ?: "model-${System.currentTimeMillis()}.gguf"
+        val safe = name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifEmpty { "model.gguf" }
+        val dir = File(context.filesDir, "models").apply { mkdirs() }
+        val out = File(dir, safe)
+        val input = resolver.openInputStream(uri) ?: error("cannot open $uri")
+        input.use { src -> out.outputStream().use { dst -> src.copyTo(dst) } }
+        out
+    }
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun Chip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (selected) NeonCyan.copy(alpha = 0.20f) else RaisedPanel)
+            .border(1.dp, if (selected) NeonCyan else StrokeDim, RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 10.dp, vertical = 7.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) NeonCyan else TextSecondary,
+            fontFamily = FontFamily.Monospace,
+        )
     }
 }
 
@@ -382,11 +556,8 @@ private fun VaultRow(
     }
 }
 
-/**
- * Model picker row: shows the active model, a row of preset chips (tap = apply
- * immediately) and a free-text field for custom model ids (Save = apply).
- */
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+/** Model picker: active value + preset chips (tap = apply) + custom id field. */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ModelRow(
     field: ModelField,
@@ -421,43 +592,18 @@ private fun ModelRow(
                     fontFamily = FontFamily.Monospace,
                 )
             }
-
-            // Preset chips — tap applies instantly (encrypted at rest).
-            androidx.compose.foundation.layout.FlowRow(
+            FlowRow(
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 field.presets.forEach { preset ->
-                    val selected = current == preset
-                    Box(
-                        Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                if (selected) NeonCyan.copy(alpha = 0.20f)
-                                else RaisedPanel
-                            )
-                            .border(
-                                1.dp,
-                                if (selected) NeonCyan else StrokeDim,
-                                RoundedCornerShape(8.dp),
-                            )
-                            .clickable {
-                                current = preset
-                                onSave(field.key, preset)
-                                onSaved(field.key)
-                            }
-                            .padding(horizontal = 10.dp, vertical = 7.dp),
-                    ) {
-                        Text(
-                            preset,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = if (selected) NeonCyan else TextSecondary,
-                            fontFamily = FontFamily.Monospace,
-                        )
+                    Chip(label = preset, selected = current == preset) {
+                        current = preset
+                        onSave(field.key, preset)
+                        onSaved(field.key)
                     }
                 }
             }
-
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(7.dp),

@@ -48,6 +48,21 @@ class ProviderRegistry(private val vault: Vault) {
         ProviderPriority.OPENAI,
     )
 
+    /**
+     * Manual pin: when set, ONLY this provider is tried (no fallback).
+     * null = AUTO mode — walk the priority chain with automatic fallback.
+     * Persisted (non-secret) so the choice survives restarts.
+     */
+    @Volatile
+    private var manual: ProviderPriority? = initManual()
+
+    private fun initManual(): ProviderPriority? =
+        runCatching {
+            vault.getPlain("routing.manual")
+                ?.takeIf { it.isNotBlank() }
+                ?.let { ProviderPriority.valueOf(it) }
+        }.getOrNull()
+
     fun priorityOrder(): List<ProviderPriority> = priority.toList()
 
     fun setPriorityOrder(order: List<ProviderPriority>) {
@@ -55,11 +70,19 @@ class ProviderRegistry(private val vault: Vault) {
         priority.addAll(order)
     }
 
+    fun manualProvider(): ProviderPriority? = manual
+
+    fun setManualProvider(p: ProviderPriority?) {
+        manual = p
+        runCatching { vault.putPlain("routing.manual", p?.name ?: "") }
+    }
+
     suspend fun chat(messages: List<ChatMessage>, maxTokens: Int = 1024): ProviderResult =
         withContext(Dispatchers.IO) {
+            val chain = manual?.let { listOf(it) } ?: priority.toList()
             var lastError: String? = null
             var fallback = false
-            for (p in priority) {
+            for (p in chain) {
                 val started = System.currentTimeMillis()
                 val r = runCatching { dispatch(p, messages, maxTokens) }
                 val elapsed = System.currentTimeMillis() - started

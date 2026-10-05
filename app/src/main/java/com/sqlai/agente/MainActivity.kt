@@ -405,6 +405,17 @@ private fun AppRoot(app: JarvisApp) {
                     read = { k ->
                         runCatching { app.vault.getSecret(k) ?: app.vault.getPlain(k) }.getOrNull()
                     },
+                    routingMode = runCatching {
+                        app.providerRegistry.manualProvider()?.name ?: "AUTO"
+                    }.getOrDefault("AUTO"),
+                    onRoutingChanged = { choice ->
+                        runCatching {
+                            app.providerRegistry.setManualProvider(
+                                if (choice == "AUTO") null
+                                else ProviderPriority.valueOf(choice)
+                            )
+                        }
+                    },
                     localModelState = buildString {
                         append(govState.name)
                         if (govRss > 0) append(" · ${govRss / (1024 * 1024)} MB")

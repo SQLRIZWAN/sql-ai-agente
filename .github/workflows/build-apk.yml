@@ -47,31 +47,44 @@ jobs:
             echo "No keystore secret; falling back to debug signing."
           fi
 
-      - name: Build release APK
+      - name: Build release + debug APK
         env:
           SQLAI_STOREPASS: ${{ secrets.SQLAI_STOREPASS }}
           SQLAI_KEYPASS: ${{ secrets.SQLAI_KEYPASS }}
           SQLAI_KEYALIAS: ${{ secrets.SQLAI_KEYALIAS }}
-        run: ./gradlew :app:assembleRelease --console=plain
+        run: ./gradlew :app:assembleRelease :app:assembleDebug --console=plain
 
-      - name: Name artifact
+      - name: Name artifacts (stable names)
         run: |
           mkdir -p dist
-          SRC=app/build/outputs/apk/release
-          if [ -f "$SRC/app-release.apk" ]; then
-            OUT=dist/SQLAI-AGENTE-v${{ github.sha }}-release.apk
-            cp "$SRC/app-release.apk" "$OUT"
+          REL=app/build/outputs/apk/release
+          DBG=app/build/outputs/apk/debug
+          if [ -f "$REL/app-release.apk" ]; then
+            cp "$REL/app-release.apk" dist/SQLAI-AGENTE-release.apk
           else
-            OUT=dist/SQLAI-AGENTE-v${{ github.sha }}-unsigned.apk
-            cp "$SRC/app-release-unsigned.apk" "$OUT"
+            cp "$REL/app-release-unsigned.apk" dist/SQLAI-AGENTE-release.apk
           fi
+          cp "$DBG/app-debug.apk" dist/SQLAI-AGENTE-debug.apk
+          (cd dist && zip -j SQLAI-AGENTE-apks.zip SQLAI-AGENTE-release.apk SQLAI-AGENTE-debug.apk)
           ls -lh dist/
+
+      - name: Remove previous assets (always show only the newest build)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          IDS=$(gh api "repos/${{ github.repository }}/releases/tags/latest-build" --jq '.assets[].id' 2>/dev/null)
+          for id in $IDS; do
+            gh api -X DELETE "repos/${{ github.repository }}/releases/assets/$id" || true
+          done
+          set -e
+          echo "old assets removed"
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: sqlai-agente-apk
-          path: dist/*.apk
+          path: dist/*
           if-no-files-found: error
           retention-days: 90
 
@@ -83,7 +96,15 @@ jobs:
           name: Latest Build
           prerelease: true
           make_latest: false
-          files: dist/*.apk
+          files: |
+            dist/SQLAI-AGENTE-release.apk
+            dist/SQLAI-AGENTE-debug.apk
+            dist/SQLAI-AGENTE-apks.zip
           body: |
-            Automated build from `${{ github.sha }}`.
-            Download the APK from Assets below and install (allow unknown sources).
+            Automated build from `${{ github.sha }}` — only the **newest** build is kept here.
+
+            | Asset | Use |
+            |---|---|
+            | `SQLAI-AGENTE-release.apk` | install this (signed, R8 minified) |
+            | `SQLAI-AGENTE-debug.apk` | if release crashes (no R8) |
+            | `SQLAI-AGENTE-apks.zip` | both APKs in one download |
