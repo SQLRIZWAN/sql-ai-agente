@@ -136,6 +136,9 @@ private fun AppRoot(app: JarvisApp) {
     val tickers by app.tradingEngine.tickers.collectAsState()
     val bots by app.tradingEngine.bots.collectAsState()
     val connected by app.tradingEngine.connected.collectAsState()
+    val tradeMode by app.tradingEngine.mode.collectAsState()
+    val tradeBalance by app.tradingEngine.balance.collectAsState()
+    val goldSymbols by app.tradingEngine.goldSymbols.collectAsState()
 
     val chat = remember { mutableStateListOf<ChatLine>() }
     val thinking = remember { mutableStateListOf<String>() }
@@ -326,6 +329,22 @@ private fun AppRoot(app: JarvisApp) {
                     bots = bots,
                     connected = connected,
                     logs = tradeLogs,
+                    mode = tradeMode,
+                    balance = tradeBalance,
+                    goldSymbols = goldSymbols,
+                    onSetMode = { m -> runCatching { app.tradingEngine.setMode(m) } },
+                    onCreateBot = { botName, ex, sym, riskPct ->
+                        app.tradingEngine.startBot(
+                            com.sqlai.agente.core.trading.BotState(
+                                id = "bot-${System.currentTimeMillis()}",
+                                name = botName,
+                                exchange = ex,
+                                symbol = sym,
+                                running = true,
+                                riskPct = riskPct,
+                            ),
+                        )
+                    },
                     onStartBot = { b -> app.tradingEngine.startBot(b) },
                     onStopBot = { id -> app.tradingEngine.stopBot(id) },
                     onRemoveBot = { id -> app.tradingEngine.removeBot(id) },
@@ -336,7 +355,18 @@ private fun AppRoot(app: JarvisApp) {
                             Exchange.BYBIT -> listOf("BTCUSDT", "ETHUSDT")
                             Exchange.EXNESS -> listOf("BTCUSD")
                         }
-                        app.tradingEngine.connect(ex, symbols)
+                        if (ex == Exchange.BITGET) {
+                            // Discover gold (spot + CFD perp) BEFORE subscribing.
+                            scope.launch {
+                                val gold = withContext(Dispatchers.IO) {
+                                    runCatching { app.tradingEngine.discoverBitgetGold() }
+                                        .getOrDefault(emptyList())
+                                }
+                                app.tradingEngine.connect(ex, (symbols + gold).distinct())
+                            }
+                        } else {
+                            app.tradingEngine.connect(ex, symbols)
+                        }
                     },
                 )
 

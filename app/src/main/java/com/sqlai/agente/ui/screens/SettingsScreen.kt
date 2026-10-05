@@ -76,13 +76,21 @@ private data class ModelField(
     val presets: List<String>,
 )
 
-// Google AI Studio (free tier) + paid-tier ids for Gemini.
+// Every model id the Google AI Studio / Gemini API currently serves
+// (free-tier heavy family first, then older + Gemma open models).
 private val GEMINI_MODELS = ModelField(
     "model.gemini", "Model", "gemini-2.5-flash",
     listOf(
+        // 2.5 family — free tier in AI Studio
         "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.5-flash-lite",
+        // 2.0 family — free tier
         "gemini-2.0-flash", "gemini-2.0-flash-lite",
-        "gemini-1.5-flash", "gemini-1.5-pro",
+        // 1.5 family
+        "gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.5-flash-8b",
+        // Gemma open models served by the same API
+        "gemma-3-27b-it", "gemma-3-12b-it", "gemma-3n-e4b-it",
+        // legacy
+        "gemini-1.0-pro",
     ),
 )
 private val GROK_MODELS = ModelField(

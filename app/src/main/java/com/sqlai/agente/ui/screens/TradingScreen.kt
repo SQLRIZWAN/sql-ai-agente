@@ -21,11 +21,17 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.width
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -63,6 +69,11 @@ fun TradingScreen(
     bots: List<BotState>,
     connected: Set<Exchange>,
     logs: List<String>,
+    mode: com.sqlai.agente.core.trading.TradeMode = com.sqlai.agente.core.trading.TradeMode.PAPER,
+    balance: Double = 10_000.0,
+    goldSymbols: List<String> = emptyList(),
+    onSetMode: (com.sqlai.agente.core.trading.TradeMode) -> Unit = {},
+    onCreateBot: (name: String, exchange: Exchange, symbol: String, riskPct: Double) -> Unit = { _, _, _, _ -> },
     onStartBot: (BotState) -> Unit,
     onStopBot: (String) -> Unit,
     onRemoveBot: (String) -> Unit,
@@ -88,6 +99,55 @@ fun TradingScreen(
                 MetricTile("PNL today", fmtMoney(totalPnl), if (totalPnl >= 0) ProfitGreen else LossRed, Modifier.weight(1f))
                 MetricTile("open pos", "$openPositions", NeonCyan, Modifier.weight(1f))
                 MetricTile("bots live", "$activeBots/${bots.size}", NeonViolet, Modifier.weight(1f))
+            }
+        }
+
+        // --------------------------- paper / live mode ---------------------------
+        item {
+            Surface(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = DeepPanel,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (mode == com.sqlai.agente.core.trading.TradeMode.LIVE) LossRed.copy(alpha = 0.7f)
+                    else NeonLime.copy(alpha = 0.5f),
+                ),
+            ) {
+                Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "Trading mode",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            if (mode == com.sqlai.agente.core.trading.TradeMode.PAPER)
+                                "virtual $" + String.format(Locale.US, "%,.2f", balance)
+                            else "REAL ORDERS",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (mode == com.sqlai.agente.core.trading.TradeMode.PAPER) NeonLime else LossRed,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        ModeChip(
+                            "PAPER · demo (safe)",
+                            mode == com.sqlai.agente.core.trading.TradeMode.PAPER,
+                        ) { onSetMode(com.sqlai.agente.core.trading.TradeMode.PAPER) }
+                        ModeChip(
+                            "LIVE · real money",
+                            mode == com.sqlai.agente.core.trading.TradeMode.LIVE,
+                        ) { onSetMode(com.sqlai.agente.core.trading.TradeMode.LIVE) }
+                    }
+                    Text(
+                        "PAPER simulates fills on a $10,000 virtual balance — test here first. " +
+                            "LIVE signs real orders on the exchange (keys must be set in Vault).",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                }
             }
         }
 
@@ -125,6 +185,14 @@ fun TradingScreen(
                     }
                 }
             }
+            if (com.sqlai.agente.core.trading.Exchange.BITGET in connected && goldSymbols.isNotEmpty()) {
+                Text(
+                    "gold found: ${goldSymbols.joinToString()}",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = NeonAmber,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
         }
 
         item {
@@ -138,6 +206,8 @@ fun TradingScreen(
             }
         }
         items(tickers.values.take(8).toList()) { t -> TickerRow(t) }
+
+        item { BotBuilder(goldSymbols, connected, onCreateBot) }
 
         item {
             SectionHeader("Strategy bots", NeonViolet)
@@ -159,7 +229,7 @@ fun TradingScreen(
                 ) {
                     Icon(Icons.Default.Add, contentDescription = null, tint = NeonViolet)
                     Text(
-                        "No bots yet — launch one from the strategy builder",
+                        "No bots yet — build one above (name → symbol → Create & Start)",
                         style = MaterialTheme.typography.bodyMedium,
                         color = TextSecondary,
                         modifier = Modifier.weight(1f),
@@ -335,6 +405,175 @@ private fun BotCard(b: BotState, onStop: () -> Unit, onRemove: () -> Unit) {
         }
     }
 }
+
+@Composable
+private fun ModeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(9.dp))
+            .background(if (selected) NeonCyan.copy(alpha = 0.20f) else RaisedPanel)
+            .border(
+                1.dp,
+                if (selected) NeonCyan else StrokeDim,
+                RoundedCornerShape(9.dp),
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 11.dp, vertical = 8.dp),
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelSmall,
+            color = if (selected) NeonCyan else TextSecondary,
+            fontFamily = FontFamily.Monospace,
+        )
+    }
+}
+
+/**
+ * Bot builder: name → exchange → symbol (gold chips appear after Bitget connect
+ * discovers them) → risk → Create & Start. Every field has a sane default so a
+ * single tap on "Create & Start" launches a working bot.
+ */
+@Composable
+private fun BotBuilder(
+    goldSymbols: List<String>,
+    connected: Set<Exchange>,
+    onCreateBot: (String, Exchange, String, Double) -> Unit,
+) {
+    var name by remember { mutableStateOf("") }
+    var symbol by remember { mutableStateOf("") }
+    var risk by remember { mutableStateOf("1") }
+    var exchange by remember { mutableStateOf(Exchange.BITGET) }
+
+    val suggestions = (
+        goldSymbols + listOf("BTCUSDT", "ETHUSDT", "PAXGUSDT", "XAUUSDT")
+        ).distinct()
+
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        color = DeepPanel,
+        border = androidx.compose.foundation.BorderStroke(1.dp, NeonViolet.copy(alpha = 0.55f)),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                "Bot builder",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+            )
+
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                ModeChip("Bitget", exchange == Exchange.BITGET) { exchange = Exchange.BITGET }
+                ModeChip("Binance", exchange == Exchange.BINANCE) { exchange = Exchange.BINANCE }
+                ModeChip("Bybit", exchange == Exchange.BYBIT) { exchange = Exchange.BYBIT }
+            }
+
+            OutlinedTextField(
+                value = symbol,
+                onValueChange = { symbol = it },
+                modifier = Modifier.fillMaxWidth(),
+                placeholder = {
+                    Text(
+                        if (goldSymbols.isNotEmpty()) goldSymbols.first() else "BTCUSDT",
+                        color = TextMuted,
+                    )
+                },
+                label = { Text("Symbol (gold / crypto)", color = TextMuted) },
+                singleLine = true,
+                textStyle = MaterialTheme.typography.labelSmall.copy(
+                    color = MaterialTheme.colorScheme.onBackground,
+                    fontFamily = FontFamily.Monospace,
+                ),
+                colors = builderFieldColors(),
+            )
+
+            // Quick-pick chips — gold chips show first (discovered on connect).
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                suggestions.take(5).forEach { s ->
+                    ModeChip(s, symbol == s) { symbol = s }
+                }
+            }
+
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { name = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text(if (symbol.contains("XAU") || symbol.contains("PAXG")) "Gold bot" else "My bot", color = TextMuted) },
+                    label = { Text("Bot name", color = TextMuted) },
+                    singleLine = true,
+                    colors = builderFieldColors(),
+                )
+                OutlinedTextField(
+                    value = risk,
+                    onValueChange = { risk = it },
+                    modifier = Modifier.width(90.dp),
+                    placeholder = { Text("1", color = TextMuted) },
+                    label = { Text("risk %", color = TextMuted) },
+                    singleLine = true,
+                    colors = builderFieldColors(),
+                )
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Pill("Create & Start") {
+                    val sym = symbol.trim().ifEmpty {
+                        goldSymbols.firstOrNull() ?: "BTCUSDT"
+                    }
+                    val nm = name.trim().ifEmpty {
+                        when {
+                            sym.contains("XAU", true) || sym.contains("PAXG", true) -> "Gold bot"
+                            else -> "$sym bot"
+                        }
+                    }
+                    val riskPct = risk.trim().toDoubleOrNull()?.coerceIn(0.1, 10.0) ?: 1.0
+                    onCreateBot(nm, exchange, sym, riskPct)
+                    name = ""; symbol = ""; risk = "1"
+                }
+                Text(
+                    if (connected.isEmpty()) "connect an exchange first (above)"
+                    else "strategy: RSI + MACD + EMA cross · SL/TP gates",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = TextMuted,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun Pill(text: String, onClick: () -> Unit) {
+    Box(
+        Modifier
+            .clip(RoundedCornerShape(9.dp))
+            .background(NeonLime.copy(alpha = 0.16f))
+            .border(1.dp, NeonLime.copy(alpha = 0.55f), RoundedCornerShape(9.dp))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.labelSmall, color = NeonLime)
+    }
+}
+
+@Composable
+private fun builderFieldColors() = OutlinedTextFieldDefaults.colors(
+    focusedBorderColor = NeonViolet,
+    unfocusedBorderColor = StrokeDim,
+    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+    cursorColor = NeonViolet,
+    focusedContainerColor = RaisedPanel,
+    unfocusedContainerColor = RaisedPanel,
+)
 
 @Composable
 private fun LabelValue(label: String, value: String, color: Color = TextSecondary) {

@@ -6,6 +6,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -56,6 +57,9 @@ data class OrderBook(
 }
 
 enum class SignalSide { LONG, SHORT, FLAT }
+
+/** PAPER = simulated fills on a virtual balance (safe testing). LIVE = real orders. */
+enum class TradeMode { PAPER, LIVE }
 
 data class TradeSignal(
     val symbol: String,
@@ -137,14 +141,41 @@ class TradingEngine(private val vault: Vault) {
     private val candles = mutableMapOf<String, ArrayDeque<Double>>()
     private var engineJob: Job? = null
 
+    // PAPER is the default so nothing real can fire until the user opts in.
+    private val _mode = MutableStateFlow(TradeMode.PAPER)
+    val mode: StateFlow<TradeMode> = _mode.asStateFlow()
+
+    private val _balance = MutableStateFlow(10_000.0)
+    val balance: StateFlow<Double> = _balance.asStateFlow()
+
+    /** Gold instruments discovered on Bitget (spot tokens + USDT-margined perps). */
+    private val _goldSymbols = MutableStateFlow<List<String>>(emptyList())
+    val goldSymbols: StateFlow<List<String>> = _goldSymbols.asStateFlow()
+    private var perpSymbols: Set<String> = emptySet()
+    private var goldPollJob: Job? = null
+
+    fun setMode(m: TradeMode) {
+        _mode.value = m
+        log("mode -> $m${if (m == TradeMode.LIVE) " (real orders!)" else " (simulated)"}")
+    }
+
+    fun isPerp(symbol: String): Boolean = symbol in perpSymbols
+
     // --------------------------------- data feed ---------------------------------
 
     fun connectBinance(vararg symbols: String) = connect(Exchange.BINANCE, symbols.toList())
 
     fun connect(exchange: Exchange, symbols: List<String>) {
         if (exchange in _connected.value) return
+        // Bitget perp (CFD) prices are polled via REST; the public WS frame is spot-only.
+        val wsSymbols = if (exchange == Exchange.BITGET) symbols.filterNot { it in perpSymbols }
+        else symbols
+        if (exchange == Exchange.BITGET && wsSymbols.isEmpty()) {
+            scope.launch { startGoldFeed() }
+            return
+        }
         val path = when (exchange) {
-            Exchange.BINANCE -> symbols.joinToString("/") {
+            Exchange.BINANCE -> wsSymbols.joinToString("/") {
                 "${it.lowercase()}@ticker"
             }.let { "/stream?streams=$it" }
             Exchange.BITGET -> "v2/ws/public"
@@ -169,7 +200,7 @@ class TradingEngine(private val vault: Vault) {
                                 org.json.JSONArray().put(
                                     JSONObject().put("instType", "SPOT")
                                         .put("channel", "ticker")
-                                        .put("symbols", org.json.JSONArray(symbols))
+                                        .put("symbols", org.json.JSONArray(wsSymbols))
                                 )
                             )
                         }
@@ -267,6 +298,124 @@ class TradingEngine(private val vault: Vault) {
             if (q.isEmpty() || q.last() != t.price) {
                 q.addLast(t.price)
                 if (q.size > 512) q.removeFirst()
+            }
+        }
+    }
+
+    // --------------------------------- gold / Bitget ---------------------------------
+
+    private fun String.isGoldInstrument(): Boolean =
+        contains("XAU", ignoreCase = true) ||
+            contains("PAXG", ignoreCase = true) ||
+            contains("XAUT", ignoreCase = true) ||
+            contains("GOLD", ignoreCase = true)
+
+    private fun getJson(url: String): JSONObject? {
+        val req = Request.Builder().url(url).build()
+        http.newCall(req).execute().use { resp ->
+            if (!resp.isSuccessful) return null
+            val text = resp.body?.string() ?: return null
+            return JSONObject(text)
+        }
+    }
+
+    /**
+     * Finds gold on Bitget: spot tokens (PAXG/XAUT) + USDT-margined perpetuals
+     * (CFD-style XAUUSDT if listed). Starts a 2s REST price feed for them so
+     * bots can trade gold even when the spot WS doesn't carry the symbol.
+     */
+    suspend fun discoverBitgetGold(): List<String> = withContext(Dispatchers.IO) {
+        runCatching {
+            val found = linkedSetOf<String>()
+            val perps = mutableSetOf<String>()
+
+            getJson("https://api.bitget.com/api/v2/spot/market/tickers")
+                ?.optJSONArray("data")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val s = arr.optJSONObject(i)?.optString("symbol").orEmpty()
+                        if (s.isGoldInstrument()) found += s
+                    }
+                }
+
+            getJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES")
+                ?.optJSONArray("data")?.let { arr ->
+                    for (i in 0 until arr.length()) {
+                        val s = arr.optJSONObject(i)?.optString("symbol").orEmpty()
+                        if (s.isGoldInstrument()) {
+                            perps += s
+                            found += s
+                        }
+                    }
+                }
+
+            perpSymbols = perps
+            _goldSymbols.value = found.toList()
+            if (found.isNotEmpty()) {
+                log("gold on Bitget: ${found.joinToString()} (perp/CFD: ${perps.ifEmpty { "none" }})")
+                startGoldFeed()
+            } else {
+                log("Bitget: no gold instrument found via REST")
+            }
+            found.toList()
+        }.getOrElse { e ->
+            log("gold discovery failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** 2s REST poll for every discovered gold symbol (spot + perp/CFD). */
+    private fun startGoldFeed() {
+        if (goldPollJob?.isActive == true) return
+        goldPollJob = scope.launch {
+            while (isActive) {
+                runCatching {
+                    val wanted = _goldSymbols.value.toSet()
+                    if (wanted.isNotEmpty()) {
+                        getJson("https://api.bitget.com/api/v2/spot/market/tickers")
+                            ?.optJSONArray("data")?.let { arr ->
+                                for (i in 0 until arr.length()) {
+                                    val o = arr.optJSONObject(i) ?: continue
+                                    val s = o.optString("symbol")
+                                    if (s in wanted && s !in perpSymbols) {
+                                        val px = o.optString("lastPr").toDoubleOrNull()
+                                        if (px != null && px > 0) {
+                                            upsert(
+                                                Ticker(
+                                                    symbol = s,
+                                                    price = px,
+                                                    change24h = o.optString("change24h").toDoubleOrNull() ?: 0.0,
+                                                    high24h = o.optString("high24h").toDoubleOrNull() ?: 0.0,
+                                                    low24h = o.optString("low24h").toDoubleOrNull() ?: 0.0,
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        getJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES")
+                            ?.optJSONArray("data")?.let { arr ->
+                                for (i in 0 until arr.length()) {
+                                    val o = arr.optJSONObject(i) ?: continue
+                                    val s = o.optString("symbol")
+                                    if (s in wanted) {
+                                        val px = o.optString("lastPr").toDoubleOrNull()
+                                        if (px != null && px > 0) {
+                                            upsert(
+                                                Ticker(
+                                                    symbol = s,
+                                                    price = px,
+                                                    change24h = o.optString("change24h").toDoubleOrNull() ?: 0.0,
+                                                    high24h = o.optString("high24h").toDoubleOrNull() ?: 0.0,
+                                                    low24h = o.optString("low24h").toDoubleOrNull() ?: 0.0,
+                                                )
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                    }
+                }
+                delay(2_000)
             }
         }
     }
@@ -391,7 +540,25 @@ class TradingEngine(private val vault: Vault) {
             if (it.id == bot.id) it.copy(positions = it.positions + pos, tradeCount = it.tradeCount + 1)
             else it
         }
-        log("OPEN ${signal.side} ${signal.symbol} qty=$qty @ $price sl=$sl tp=$tp (${signal.reason})")
+        val tag = if (_mode.value == TradeMode.PAPER) "[PAPER]" else "[LIVE]"
+        log("$tag OPEN ${signal.side} ${signal.symbol} qty=$qty @ $price sl=$sl tp=$tp (${signal.reason})")
+        if (_mode.value == TradeMode.LIVE) {
+            scope.launch { submitLive(bot, signal.symbol, signal.side, qty) }
+        }
+    }
+
+    /** LIVE mode only: routes the order to the right venue/endpoint. */
+    private suspend fun submitLive(bot: BotState, symbol: String, side: SignalSide, qty: Double) {
+        val sideStr = if (side == SignalSide.LONG) "buy" else "sell"
+        val r = when (bot.exchange) {
+            Exchange.BITGET ->
+                if (symbol in perpSymbols) placeBitgetMixOrder(symbol, sideStr, qty)
+                else placeBitgetOrder(symbol, sideStr, qty)
+            Exchange.BINANCE -> placeBinanceOrder(symbol, sideStr.uppercase(), qty)
+            else -> Result.failure(IOException("live trading not wired for ${bot.exchange.label}"))
+        }
+        r.onSuccess { log("LIVE order ok: $symbol $sideStr") }
+            .onFailure { log("LIVE order FAILED: $symbol — ${it.message}") }
     }
 
     /** Stop-loss / take-profit enforcement — runs every tick regardless of strategy. */
@@ -425,7 +592,12 @@ class TradingEngine(private val vault: Vault) {
                 pnlToday = it.pnlToday + pos.pnl,
             ) else it
         }
-        log("CLOSE ${pos.symbol} $why pnl=${"%.2f".format(pos.pnl)}")
+        if (_mode.value == TradeMode.PAPER) {
+            // Virtual wallet: realised PnL compounds the paper balance.
+            _balance.value += pos.pnl
+        }
+        val tag = if (_mode.value == TradeMode.PAPER) "[PAPER]" else "[LIVE]"
+        log("$tag CLOSE ${pos.symbol} $why pnl=${"%.2f".format(pos.pnl)} bal=${"%.2f".format(_balance.value)}")
     }
 
     /** Squares everything up — called on shutdown / drawdown guard. */
@@ -508,6 +680,48 @@ class TradingEngine(private val vault: Vault) {
         }
     }
 
+    /**
+     * Bitget USDT-margined perpetual (CFD) order — used for gold XAU perps.
+     * Signed exactly like the spot call but against the mix endpoint.
+     */
+    suspend fun placeBitgetMixOrder(
+        symbol: String, side: String, qty: Double,
+    ): Result<JSONObject> = runCatching {
+        val key = vault.getSecret(Vault.KEY_BITGET_API) ?: throw IOException("Bitget API key not set")
+        val secret = vault.getSecret(Vault.KEY_BITGET_SECRET) ?: throw IOException("Bitget API secret not set")
+        val pass = vault.getSecret(Vault.KEY_BITGET_PASSPHRASE) ?: throw IOException("Bitget passphrase not set")
+
+        // Mix sizes are whole contracts/pieces (e.g. 1 oz of XAU) — never 0.
+        val size = kotlin.math.ceil(qty).toLong().coerceAtLeast(1L)
+        val ts = System.currentTimeMillis().toString()
+        val body = JSONObject()
+            .put("symbol", symbol)
+            .put("marginCoin", "USDT")
+            .put("side", side.lowercase())
+            .put("orderType", "market")
+            .put("size", size.toString())
+            .put("force", "gtc")
+            .put("reduceOnly", false)
+            .toString()
+        val prehash = "$ts POST /api/v2/mix/order/place$body"
+        val sign = hmacSha256Hex(secret, prehash)
+
+        val req = Request.Builder()
+            .url("https://api.bitget.com/api/v2/mix/order/place")
+            .addHeader("ACCESS-KEY", key)
+            .addHeader("ACCESS-SIGN", sign)
+            .addHeader("ACCESS-TIMESTAMP", ts)
+            .addHeader("ACCESS-PASSPHRASE", pass)
+            .addHeader("Content-Type", "application/json")
+            .post(body.toRequestBody("application/json".toMediaType()))
+            .build()
+        http.newCall(req).execute().use { resp ->
+            val text = resp.body?.string().orEmpty()
+            if (!resp.isSuccessful) throw IOException("HTTP ${resp.code}: $text")
+            JSONObject(text)
+        }
+    }
+
     private fun log(msg: String) {
         _logs.tryEmit("${System.currentTimeMillis() % 100_000} $msg")
     }
@@ -516,6 +730,7 @@ class TradingEngine(private val vault: Vault) {
         sockets.values.forEach { it.close(1000, "bye") }
         sockets.clear()
         engineJob?.cancel()
+        goldPollJob?.cancel()
         _connected.value = emptySet()
     }
 

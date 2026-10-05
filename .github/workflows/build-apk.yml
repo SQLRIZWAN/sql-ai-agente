@@ -47,25 +47,22 @@ jobs:
             echo "No keystore secret; falling back to debug signing."
           fi
 
-      - name: Build release + debug APK
+      - name: Build release APK
         env:
           SQLAI_STOREPASS: ${{ secrets.SQLAI_STOREPASS }}
           SQLAI_KEYPASS: ${{ secrets.SQLAI_KEYPASS }}
           SQLAI_KEYALIAS: ${{ secrets.SQLAI_KEYALIAS }}
-        run: ./gradlew :app:assembleRelease :app:assembleDebug --console=plain
+        run: ./gradlew :app:assembleRelease --console=plain
 
-      - name: Name artifacts (stable names)
+      - name: Name artifact (single stable name — newest only)
         run: |
           mkdir -p dist
           REL=app/build/outputs/apk/release
-          DBG=app/build/outputs/apk/debug
           if [ -f "$REL/app-release.apk" ]; then
             cp "$REL/app-release.apk" dist/SQLAI-AGENTE-release.apk
           else
             cp "$REL/app-release-unsigned.apk" dist/SQLAI-AGENTE-release.apk
           fi
-          cp "$DBG/app-debug.apk" dist/SQLAI-AGENTE-debug.apk
-          (cd dist && zip -j SQLAI-AGENTE-apks.zip SQLAI-AGENTE-release.apk SQLAI-AGENTE-debug.apk)
           ls -lh dist/
 
       - name: Remove previous assets (always show only the newest build)
@@ -96,15 +93,7 @@ jobs:
           name: Latest Build
           prerelease: true
           make_latest: false
-          files: |
-            dist/SQLAI-AGENTE-release.apk
-            dist/SQLAI-AGENTE-debug.apk
-            dist/SQLAI-AGENTE-apks.zip
+          files: dist/SQLAI-AGENTE-release.apk
           body: |
-            Automated build from `${{ github.sha }}` — only the **newest** build is kept here.
-
-            | Asset | Use |
-            |---|---|
-            | `SQLAI-AGENTE-release.apk` | install this (signed, R8 minified) |
-            | `SQLAI-AGENTE-debug.apk` | if release crashes (no R8) |
-            | `SQLAI-AGENTE-apks.zip` | both APKs in one download |
+            Newest build only — `${{ github.sha }}`.
+            Download `SQLAI-AGENTE-release.apk` and install (allow unknown sources).
