@@ -13,8 +13,12 @@ android {
         applicationId = "com.sqlai.agente"
         minSdk = 29
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0.0"
+        // Auto-increment: CI/local pass SQLAI_VERSION_CODE (epoch minutes) so
+        // every build is an UPGRADABLE install over the previous one.
+        versionCode = (System.getenv("SQLAI_VERSION_CODE")?.toIntOrNull())
+            ?: (System.currentTimeMillis() / 60_000L).toInt()
+        versionName = System.getenv("SQLAI_VERSION_NAME")
+            ?: "1.0-${System.currentTimeMillis() / 60_000L}"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

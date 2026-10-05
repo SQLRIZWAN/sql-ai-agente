@@ -47,22 +47,31 @@ jobs:
             echo "No keystore secret; falling back to debug signing."
           fi
 
-      - name: Build release APK
+      # Every build gets a strictly increasing versionCode (epoch minutes) so
+      # Android treats each APK as an UPDATE of the previously installed one.
+      - name: Build release + debug APK
         env:
           SQLAI_STOREPASS: ${{ secrets.SQLAI_STOREPASS }}
           SQLAI_KEYPASS: ${{ secrets.SQLAI_KEYPASS }}
           SQLAI_KEYALIAS: ${{ secrets.SQLAI_KEYALIAS }}
-        run: ./gradlew :app:assembleRelease --console=plain
+          SQLAI_VERSION_CODE: $(( $(date +%s) / 60 ))
+          SQLAI_VERSION_NAME: 1.0.${{ github.run_number }}
+        run: ./gradlew :app:assembleRelease :app:assembleDebug --console=plain
 
-      - name: Name artifact (single stable name — newest only)
+      - name: Verify signature + name artifacts
+        id: pkg
         run: |
-          mkdir -p dist
+          BT="$ANDROID_HOME/build-tools/34.0.0"
+          [ -x "$BT/apksigner" ] || BT="$(find "$ANDROID_HOME/build-tools" -name apksigner -printf '%h\n' | head -1)"
           REL=app/build/outputs/apk/release
-          if [ -f "$REL/app-release.apk" ]; then
-            cp "$REL/app-release.apk" dist/SQLAI-AGENTE-release.apk
-          else
-            cp "$REL/app-release-unsigned.apk" dist/SQLAI-AGENTE-release.apk
-          fi
+          if [ -f "$REL/app-release.apk" ]; then APK="$REL/app-release.apk"; else APK="$REL/app-release-unsigned.apk"; fi
+          "$BT/apksigner" verify --verbose "$APK"
+          echo "signature OK"
+          mkdir -p dist
+          cp "$APK" dist/SQLAI-AGENTE-release.apk
+          cp app/build/outputs/apk/debug/app-debug.apk dist/SQLAI-AGENTE-debug.apk
+          SHA=$(sha256sum dist/SQLAI-AGENTE-release.apk | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           ls -lh dist/
 
       - name: Remove previous assets (always show only the newest build)
@@ -77,15 +86,15 @@ jobs:
           set -e
           echo "old assets removed"
 
-      - name: Upload APK artifact
+      - name: Upload debug APK as CI artifact (NOT on release page)
         uses: actions/upload-artifact@v4
         with:
-          name: sqlai-agente-apk
-          path: dist/*
+          name: sqlai-agente-debug
+          path: dist/SQLAI-AGENTE-debug.apk
           if-no-files-found: error
           retention-days: 90
 
-      - name: Publish GitHub Release
+      - name: Publish GitHub Release (single APK only)
         if: startsWith(github.ref, 'refs/heads/')
         uses: softprops/action-gh-release@v2
         with:
@@ -95,5 +104,11 @@ jobs:
           make_latest: false
           files: dist/SQLAI-AGENTE-release.apk
           body: |
-            Newest build only — `${{ github.sha }}`.
-            Download `SQLAI-AGENTE-release.apk` and install (allow unknown sources).
+            Newest build only — commit `${{ github.sha }}`, run `${{ github.run_number }}`.
+
+            **Install:** download `SQLAI-AGENTE-release.apk` → install (allow unknown sources).
+            If an older/different-signed copy is on the phone, **uninstall it first** (one time).
+
+            **SHA-256:** `${{ steps.pkg.outputs.sha256 }}`
+
+            Debug APK (if release ever misbehaves): CI Artifacts → `sqlai-agente-debug`.
