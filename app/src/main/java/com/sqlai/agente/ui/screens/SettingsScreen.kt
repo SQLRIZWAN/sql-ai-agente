@@ -43,6 +43,7 @@ import androidx.compose.ui.unit.dp
 import com.sqlai.agente.ui.components.SectionHeader
 import com.sqlai.agente.ui.theme.DeepPanel
 import com.sqlai.agente.ui.theme.NeonCyan
+import com.sqlai.agente.ui.theme.NeonLime
 import com.sqlai.agente.ui.theme.NeonRose
 import com.sqlai.agente.ui.theme.NeonViolet
 import com.sqlai.agente.ui.theme.RaisedPanel
@@ -76,6 +77,38 @@ private val EXCHANGE_FIELDS = listOf(
     VaultField("exchange.exness.token", "Exness token", "…"),
 )
 
+private data class ModelField(
+    val key: String,
+    val label: String,
+    val hint: String,
+    val presets: List<String>,
+)
+
+private val MODEL_FIELDS = listOf(
+    ModelField(
+        "model.gemini", "Gemini model", "gemini-2.0-flash",
+        listOf("gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-lite"),
+    ),
+    ModelField(
+        "model.grok", "Grok model", "grok-3-mini",
+        listOf("grok-3-mini", "grok-3", "grok-4-fast", "grok-3-mini-latest"),
+    ),
+    ModelField(
+        "model.deepseek", "DeepSeek model", "deepseek-chat",
+        listOf("deepseek-chat", "deepseek-reasoner"),
+    ),
+    ModelField(
+        "model.openai", "OpenAI model", "gpt-4o-mini",
+        listOf("gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1", "o4-mini"),
+    ),
+    ModelField(
+        "model.ollama", "Ollama / LM Studio model", "qwen2.5-coder:3b",
+        listOf("qwen2.5-coder:3b", "llama3.2:3b", "phi4-mini", "mistral:7b-instruct", "gemma3:4b"),
+    ),
+)
+
+private const val LOCAL_MODEL_KEY = "model.local"
+
 /**
  * Tab 5 — Settings & API Vault.
  * Keys are AES-256-GCM sealed through the Android Keystore the moment "Save" is hit;
@@ -88,10 +121,15 @@ fun SettingsScreen(
     onDelete: (String) -> Unit,
     providerOrder: String,
     onProviderOrderChanged: (String) -> Unit,
+    read: (String) -> String? = { null },
+    localModelState: String = "EMPTY",
+    onLoadLocal: (String) -> Unit = {},
+    onUnloadLocal: () -> Unit = {},
 ) {
     val visible = remember { mutableStateMapOf<String, Boolean>() }
     val drafts = remember { mutableStateMapOf<String, String>() }
     var savedFlash by remember { mutableStateOf<String?>(null) }
+    var localPath by remember { mutableStateOf(read(LOCAL_MODEL_KEY) ?: "") }
 
     LazyColumn(
         Modifier
@@ -156,6 +194,75 @@ fun SettingsScreen(
         items(AI_FIELDS.size) { i -> VaultRow(AI_FIELDS[i], hasKey, drafts, visible, savedFlash) { k, v ->
             onSave(k, v); savedFlash = k
         } }
+
+        item { SectionHeader("Model selection (tap a preset or type your own)", NeonViolet) }
+        items(MODEL_FIELDS.size) { i ->
+            ModelRow(MODEL_FIELDS[i], read, onSave) { savedFlash = it }
+        }
+
+        item { SectionHeader("Local AI model (GGUF · runs on-device)", NeonLime) }
+        item {
+            Surface(
+                Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(11.dp),
+                color = DeepPanel,
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (savedFlash == LOCAL_MODEL_KEY) NeonCyan else StrokeDim,
+                ),
+            ) {
+                Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            "llama.cpp weights",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            localModelState,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = NeonLime,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        OutlinedTextField(
+                            value = localPath,
+                            onValueChange = { localPath = it },
+                            modifier = Modifier.weight(1f),
+                            placeholder = {
+                                Text("/storage/emulated/0/models/qwen-3b-q4.gguf", color = TextMuted)
+                            },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.labelSmall.copy(
+                                color = MaterialTheme.colorScheme.onBackground,
+                                fontFamily = FontFamily.Monospace,
+                            ),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                            colors = fieldColors(),
+                        )
+                        TextButtonPill("Load") {
+                            val path = localPath.trim()
+                            if (path.isNotEmpty()) {
+                                onSave(LOCAL_MODEL_KEY, path)
+                                savedFlash = LOCAL_MODEL_KEY
+                                onLoadLocal(path)
+                            }
+                        }
+                        TextButtonPill("Unload") { onUnloadLocal() }
+                    }
+                    Text(
+                        "Path is stored encrypted; weights are evicted on background/thermal throttle.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextMuted,
+                    )
+                }
+            }
+        }
 
         item { SectionHeader("Exchange keys", NeonRose) }
         items(EXCHANGE_FIELDS.size) { i -> VaultRow(EXCHANGE_FIELDS[i], hasKey, drafts, visible, savedFlash) { k, v ->
@@ -268,6 +375,112 @@ private fun VaultRow(
                     if (v.isNotEmpty()) {
                         onSave(field.key, v)
                         drafts[field.key] = ""
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Model picker row: shows the active model, a row of preset chips (tap = apply
+ * immediately) and a free-text field for custom model ids (Save = apply).
+ */
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
+private fun ModelRow(
+    field: ModelField,
+    read: (String) -> String?,
+    onSave: (String, String) -> Unit,
+    onSaved: (String) -> Unit,
+) {
+    var current by remember(field.key) { mutableStateOf(read(field.key) ?: "") }
+    var draft by remember(field.key) { mutableStateOf("") }
+
+    Surface(
+        Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(11.dp),
+        color = DeepPanel,
+        border = androidx.compose.foundation.BorderStroke(
+            1.dp,
+            if (current.isNotEmpty()) NeonCyan.copy(alpha = 0.55f) else StrokeDim,
+        ),
+    ) {
+        Column(Modifier.padding(11.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    field.label,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    if (current.isEmpty()) "default: ${field.hint}" else current,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = if (current.isEmpty()) TextMuted else NeonCyan,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+
+            // Preset chips — tap applies instantly (encrypted at rest).
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                field.presets.forEach { preset ->
+                    val selected = current == preset
+                    Box(
+                        Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                if (selected) NeonCyan.copy(alpha = 0.20f)
+                                else RaisedPanel
+                            )
+                            .border(
+                                1.dp,
+                                if (selected) NeonCyan else StrokeDim,
+                                RoundedCornerShape(8.dp),
+                            )
+                            .clickable {
+                                current = preset
+                                onSave(field.key, preset)
+                                onSaved(field.key)
+                            }
+                            .padding(horizontal = 10.dp, vertical = 7.dp),
+                    ) {
+                        Text(
+                            preset,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selected) NeonCyan else TextSecondary,
+                            fontFamily = FontFamily.Monospace,
+                        )
+                    }
+                }
+            }
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    modifier = Modifier.weight(1f),
+                    placeholder = { Text(field.hint, color = TextMuted) },
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.labelSmall.copy(
+                        color = MaterialTheme.colorScheme.onBackground,
+                        fontFamily = FontFamily.Monospace,
+                    ),
+                    colors = fieldColors(),
+                )
+                TextButtonPill("Save") {
+                    val v = draft.trim()
+                    if (v.isNotEmpty()) {
+                        current = v
+                        onSave(field.key, v)
+                        onSaved(field.key)
+                        draft = ""
                     }
                 }
             }

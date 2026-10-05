@@ -157,6 +157,7 @@ private fun AppRoot(app: JarvisApp) {
         .collectAsState()
 
     LaunchedEffect(Unit) {
+        runCatching { app.modelGovernor.attachMonitor(app.systemMonitor) }
         // Restore recent conversation locally (encrypted at rest).
         withContext(Dispatchers.IO) {
             val rows = runCatching { db?.recentMessages(40) }.getOrNull() ?: emptyList()
@@ -367,7 +368,10 @@ private fun AppRoot(app: JarvisApp) {
                     onRunWorkflow = { name -> autoLogs += "run workflow '$name'" },
                 )
 
-                4 -> SettingsScreen(
+                4 -> {
+                    val govState by app.modelGovernor.state.collectAsState()
+                    val govRss by app.modelGovernor.residentBytes.collectAsState()
+                    SettingsScreen(
                     hasKey = { k ->
                         runCatching { app.vault.hasSecret(k) || app.vault.getPlain(k) != null }
                             .getOrDefault(false)
@@ -398,7 +402,23 @@ private fun AppRoot(app: JarvisApp) {
                             if (parsed.isNotEmpty()) app.providerRegistry.setPriorityOrder(parsed)
                         }
                     },
-                )
+                    read = { k ->
+                        runCatching { app.vault.getSecret(k) ?: app.vault.getPlain(k) }.getOrNull()
+                    },
+                    localModelState = buildString {
+                        append(govState.name)
+                        if (govRss > 0) append(" · ${govRss / (1024 * 1024)} MB")
+                    },
+                    onLoadLocal = { path ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                runCatching { app.modelGovernor.load(path) }
+                            }
+                        }
+                    },
+                    onUnloadLocal = { runCatching { app.modelGovernor.unload() } },
+                    )
+                }
             }
         }
     }

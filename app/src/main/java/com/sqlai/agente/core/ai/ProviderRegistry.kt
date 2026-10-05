@@ -89,6 +89,20 @@ class ProviderRegistry(private val vault: Vault) {
             ProviderPriority.CUSTOM -> ollamaChat(messages, maxTokens)
         }
 
+    /**
+     * Resolves the user-selected model for a provider. Settings saves via
+     * [Vault.putSecret] (encrypted), older entries used plain prefs — accept both,
+     * then the legacy "<name>.model" key, then [fallback].
+     */
+    private fun modelFor(name: String, fallback: String): String =
+        runCatching {
+            vault.getSecret("model.$name")
+                ?: vault.getPlain("model.$name")
+                ?: vault.getSecret("$name.model")
+                ?: vault.getPlain("$name.model")
+                ?: fallback
+        }.getOrDefault(fallback)
+
     // ------------------------------ providers ------------------------------
 
     private fun localChat(messages: List<ChatMessage>, maxTokens: Int): ProviderResult {
@@ -113,7 +127,9 @@ class ProviderRegistry(private val vault: Vault) {
             })
             put("generationConfig", JSONObject().put("maxOutputTokens", maxTokens))
         }
-        val url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$key"
+        val model = modelFor("gemini", "gemini-2.0-flash")
+        val url = "https://generativelanguage.googleapis.com/v1beta/models/" +
+            "$model:generateContent?key=$key"
         return postJson(url, body, "gemini", emptyMap())
     }
 
@@ -137,7 +153,7 @@ class ProviderRegistry(private val vault: Vault) {
             ?: vault.getPlain("ollama.endpoint")
             ?: return ProviderResult("ollama", "", error = "no local endpoint")
         val body = JSONObject().apply {
-            put("model", vault.getPlain("ollama.model") ?: "qwen2.5-coder:3b")
+            put("model", modelFor("ollama", "qwen2.5-coder:3b"))
             put("messages", JSONArray().apply {
                 messages.forEach { m ->
                     put(JSONObject().put("role", m.role).put("content", m.content))
@@ -154,7 +170,7 @@ class ProviderRegistry(private val vault: Vault) {
         url: String, key: String, messages: List<ChatMessage>, maxTokens: Int, name: String,
     ): ProviderResult {
         val body = JSONObject().apply {
-            put("model", vault.getPlain("$name.model") ?: defaultModel(name))
+            put("model", modelFor(name, defaultModel(name)))
             put("max_tokens", maxTokens)
             put("messages", JSONArray().apply {
                 messages.forEach { m ->
